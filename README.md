@@ -2,7 +2,7 @@
 
 A very small Python app that says hello. The app is not the point: the point is the
 path a change takes from a branch, through a build, into a pod on GKE - once per
-environment, with nothing shared between them by accident
+environment, with nothing shared between them by accident..
 
 ## The three environments
 
