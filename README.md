@@ -124,6 +124,11 @@ Variables:
 | `AR_REPO` | `breaker` |
 | `GKE_CLUSTER` | `btl-mock` |
 
+One thing lives in Google Cloud rather than in GitHub: the cluster nodes pull
+images as the project's default compute account, so that account needs
+`roles/artifactregistry.reader` on the `breaker` repository. Without it the pods
+sit in `ImagePullBackOff`. `infra-setup.yml` grants it.
+
 There are also three GitHub environments - `dev`, `test` and `prod` - one per
 deploy. Add required reviewers to `prod` in the repository settings and every
 release to production will wait for someone to approve it.
