@@ -5,6 +5,10 @@ name: CI
 on:
   pull_request:
     branches: [dev, test, main]
+    # `labeled` and `unlabeled` are here so the "What this merge would release"
+    # job re-runs when a `version:*` label is added or removed and the summary
+    # shows the up-to-date version.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
   group: ci-${{ github.ref }}
