@@ -53,26 +53,61 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The label is read here, at merge time, rather than written into the
-          # branch. That keeps it editable right up to the moment you merge.
+          # Two ways to ask for a size, checked in this order:
+          #   1. A `version:major|minor|patch` label on the pull request the
+          #      pushed commit came from. Read here, at merge time, so it stays
+          #      editable right up to the moment you merge.
+          #   2. A `[version:major|minor|patch]` tag anywhere in the head
+          #      commit's message. This is the plain-git shortcut for a push
+          #      that has no pull request:
+          #        git commit -m "small change [version:minor]"
+          #        git push
+          # If both name a size and they disagree, the label wins - it is the
+          # more visible one on the pull request page.
+          # If neither says anything, the release is a patch.
+          source=""
+          picked=""
+
+          # 1. pull request label
           labels=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
             --jq '.[0].labels[]?.name' 2>/dev/null || true)
-          picked=$(printf '%s\n' "$labels" | sed -n 's/^version://p' | sort -u)
-          count=$(printf '%s' "$picked" | grep -c . || true)
-          if [[ "$count" -gt 1 ]]; then
-            echo "::error::This pull request carries more than one version label ($(echo $picked)). Use one of version:major, version:minor, version:patch."
+          label_bumps=$(printf '%s\n' "$labels" | sed -n 's/^version://p' | sort -u)
+          label_count=$(printf '%s' "$label_bumps" | grep -c . || true)
+          if [[ "$label_count" -gt 1 ]]; then
+            echo "::error::The pull request carries more than one version label ($(echo $label_bumps)). Use one of version:major, version:minor, version:patch."
             exit 1
           fi
+          if [[ -n "$label_bumps" ]]; then
+            picked="$label_bumps"
+            source="the pull request label"
+          fi
+
+          # 2. commit message tag
+          msg=$(git log -1 --format=%B "$GITHUB_SHA")
+          msg_bumps=$(printf '%s' "$msg" | grep -oE '\[version:(major|minor|patch)\]' \
+            | sed 's/\[version:\(.*\)\]/\1/' | sort -u)
+          msg_count=$(printf '%s' "$msg_bumps" | grep -c . || true)
+          if [[ "$msg_count" -gt 1 ]]; then
+            echo "::error::The commit message names more than one release size ($(echo $msg_bumps)). Use exactly one of [version:major], [version:minor], [version:patch]."
+            exit 1
+          fi
+          if [[ -n "$msg_bumps" && -z "$picked" ]]; then
+            picked="$msg_bumps"
+            source="the commit message tag"
+          elif [[ -n "$msg_bumps" && -n "$picked" && "$msg_bumps" != "$picked" ]]; then
+            echo "The commit message tag [version:$msg_bumps] and the pull request label version:$picked disagree - the label wins."
+          fi
+
           bump="${picked:-patch}"
           case "$bump" in
             major|minor|patch) ;;
-            *) echo "::error::'version:$bump' is not a label this repository knows. Use version:major, version:minor or version:patch."; exit 1 ;;
+            *) echo "::error::'$bump' is not a size this repository knows."; exit 1 ;;
           esac
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
           if [[ -z "$picked" ]]; then
-            echo "No version label, so this is a patch."
+            echo "Nothing said the size (no label, no [version:*] tag on the commit), so this is a patch."
           else
-            echo "The pull request asked for a $bump release."
+            echo "$source asked for a $bump release."
           fi
 
       - name: What version is that

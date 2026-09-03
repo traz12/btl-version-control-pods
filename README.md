@@ -51,7 +51,24 @@ branch releases the next number - a **patch** by default:
 The label is read at merge time, off the pull request the pushed commit came from,
 so you can change your mind about the size of a release right up to the moment you
 merge. Two `version:` labels on one pull request fails the run before anything is
-built. A push straight to `dev` has no pull request, so it is a patch.
+built.
+
+### For a plain `git push` (no pull request)
+
+`dev` takes direct pushes, so you can size the release from the commit message
+instead of a label - the deploy reads a `[version:major|minor|patch]` tag
+anywhere in the head commit's message:
+
+```
+git add .
+git commit -m "small change [version:minor]"
+git push
+```
+
+Both mechanisms work at the same time. If a push has a pull request with a
+label *and* a commit message tag, and they disagree, the label wins - it is
+the more visible one. Two tags in one commit message fails the run. No label
+and no tag means a patch.
 
 That one number is used everywhere the release shows up:
 
