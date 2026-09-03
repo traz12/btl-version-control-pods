@@ -6,6 +6,8 @@ metadata:
   labels:
     app: breaker
     environment: prod
+    # Filled in by the deploy workflow, so `kubectl get` shows the version.
+    app.kubernetes.io/version: "${VERSION}"
 spec:
   replicas: 3
   selector:
@@ -16,6 +18,7 @@ spec:
       labels:
         app: breaker
         environment: prod
+        app.kubernetes.io/version: "${VERSION}"
     spec:
       containers:
         - name: breaker

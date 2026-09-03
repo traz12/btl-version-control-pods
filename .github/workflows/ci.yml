@@ -82,8 +82,47 @@ jobs:
         run: |
           for env in dev test prod; do
             for file in namespace deployment service; do
-              IMAGE=example/image:tag envsubst '${IMAGE}' < "k8s/$env/$file.yaml" \
+              IMAGE=example/image:tag VERSION=1.0.0 envsubst '${IMAGE} ${VERSION}' \
+                < "k8s/$env/$file.yaml" \
                 | python3 -c 'import sys,yaml; yaml.safe_load(sys.stdin)'
               echo "ok: k8s/$env/$file.yaml"
             done
           done
+
+  version:
+    name: What this merge would release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the release tags are the version history
+
+      - name: Work out the next version
+        env:
+          BASE: ${{ github.base_ref }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          ENV=$(bash scripts/env_for_branch.sh "$BASE")
+          picked=$(printf '%s\n' $LABELS | sed -n 's/^version://p' | sort -u)
+          count=$(printf '%s' "$picked" | grep -c . || true)
+          if [[ "$count" -gt 1 ]]; then
+            echo "::error::This pull request carries more than one version label ($(echo $picked)). Use one of version:major, version:minor, version:patch."
+            exit 1
+          fi
+          BUMP="${picked:-patch}"
+          CURRENT=$(bash scripts/version.sh "$ENV" current)
+          NEXT=$(bash scripts/version.sh "$ENV" next "$BUMP")
+          echo "Merging this into $BASE releases $ENV v$NEXT (now at $CURRENT, a $BUMP release)."
+          {
+            echo "### Merging this releases \`$ENV\` v$NEXT"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| $ENV is at | \`$CURRENT\` |"
+            echo "| Release size | \`$BUMP\` |"
+            echo "| New git tag | \`$ENV/v$NEXT\` |"
+            echo ""
+            echo "Add a \`version:minor\` or \`version:major\` label to make it bigger."
+            echo "The label is read again when you merge, so changing it later still works -"
+            echo "this line just will not refresh until the next push."
+          } >> "$GITHUB_STEP_SUMMARY"
