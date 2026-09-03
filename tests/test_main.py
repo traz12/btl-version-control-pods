@@ -8,7 +8,7 @@ client = TestClient(app)
 def test_hello_says_hello():
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json()["message"] == "Hello World from breaker"
+    assert response.json()["message"] == "Hello World from breaker (versioned)"
 
 
 def test_healthz_is_ok():

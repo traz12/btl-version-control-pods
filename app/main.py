@@ -15,7 +15,7 @@ app = FastAPI(title=f"breaker ({ENVIRONMENT})")
 @app.get("/")
 def hello():
     return {
-        "message": "Hello World from breaker",
+        "message": "Hello World from breaker (versioned)",
         "environment": ENVIRONMENT,
         "version": APP_VERSION,
     }
