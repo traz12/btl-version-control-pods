@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+# Lets the tests import the app package from the repository root.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

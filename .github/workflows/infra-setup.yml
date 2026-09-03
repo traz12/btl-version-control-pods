@@ -1,0 +1,56 @@
+name: Infra setup (run once)
+
+# Creates the things the deploy workflow expects to already exist:
+# the Artifact Registry repository and the three namespaces.
+# Safe to run again - it skips anything that is already there.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Create registry and namespaces
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      AR_REPO: ${{ vars.AR_REPO }}
+      CLUSTER: ${{ vars.GKE_CLUSTER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sign in to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Artifact Registry repository
+        run: |
+          if gcloud artifacts repositories describe "$AR_REPO" \
+               --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
+            echo "$AR_REPO already exists."
+          else
+            gcloud artifacts repositories create "$AR_REPO" \
+              --repository-format=docker --location="$REGION" \
+              --project="$PROJECT_ID" \
+              --description="Breaker example app images (dev/test/prod)"
+          fi
+
+      - name: Connect to the cluster
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.REGION }}
+
+      - name: Namespaces
+        run: |
+          for env in dev test prod; do
+            kubectl apply -f "k8s/$env/namespace.yaml"
+          done
+          kubectl get ns -l environment

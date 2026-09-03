@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: breaker
+  namespace: breaker-prod
+  labels:
+    app: breaker
+    environment: prod
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: breaker
+  template:
+    metadata:
+      labels:
+        app: breaker
+        environment: prod
+    spec:
+      containers:
+        - name: breaker
+          # The deploy workflow fills this in with the image it just pushed.
+          image: ${IMAGE}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ENVIRONMENT
+              value: "prod"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

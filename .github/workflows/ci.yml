@@ -1,0 +1,89 @@
+name: CI
+
+# Runs on every pull request into one of the three environment branches.
+# Nothing here touches Google Cloud - it only checks the change is safe to merge.
+on:
+  pull_request:
+    branches: [dev, test, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promotion-path:
+    name: Check the promotion path
+    runs-on: ubuntu-latest
+    steps:
+      - name: A change must travel dev -> test -> main
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          # Hotfix branches are the one way to skip a step, and they are named
+          # so that everyone can see it happened.
+          if [[ "$HEAD" == hotfix/* ]]; then
+            echo "$HEAD is a hotfix branch, so it may go straight into $BASE."
+            exit 0
+          fi
+          case "$BASE" in
+            main) expected="test" ;;
+            test) expected="dev"  ;;
+            dev)  echo "Any branch may open a pull request into dev."; exit 0 ;;
+          esac
+          if [[ "$HEAD" != "$expected" ]]; then
+            echo "::error::A pull request into '$BASE' must come from '$expected' (this one comes from '$HEAD'). Name the branch hotfix/... if you need to skip a step."
+            exit 1
+          fi
+          echo "$HEAD -> $BASE follows the promotion path."
+
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check app tests
+
+      - name: Test
+        run: pytest -q
+
+  build:
+    name: Build the image (not pushed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          # Proves the Dockerfile still works. The image is thrown away -
+          # only a push to dev, test or main is allowed to publish one.
+          docker build -t breaker:pr-${{ github.event.pull_request.number }} .
+
+  manifests:
+    name: Check the Kubernetes files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the YAML reader
+        run: pip install pyyaml
+
+      - name: Every environment file must be valid YAML
+        run: |
+          for env in dev test prod; do
+            for file in namespace deployment service; do
+              IMAGE=example/image:tag envsubst '${IMAGE}' < "k8s/$env/$file.yaml" \
+                | python3 -c 'import sys,yaml; yaml.safe_load(sys.stdin)'
+              echo "ok: k8s/$env/$file.yaml"
+            done
+          done

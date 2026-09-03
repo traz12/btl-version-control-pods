@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: breaker
+  namespace: breaker-prod
+  labels:
+    app: breaker
+    environment: prod
+spec:
+  type: ClusterIP
+  selector:
+    app: breaker
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
