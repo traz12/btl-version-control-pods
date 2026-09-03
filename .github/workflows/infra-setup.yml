@@ -42,6 +42,17 @@ jobs:
               --description="Breaker example app images (dev/test/prod)"
           fi
 
+      - name: Let the cluster nodes read the registry
+        run: |
+          # Without this the pods sit in ImagePullBackOff: the nodes run as the
+          # project's default compute account, and a new repository does not
+          # grant it anything.
+          PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+          gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
+            --location="$REGION" --project="$PROJECT_ID" \
+            --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+            --role="roles/artifactregistry.reader"
+
       - name: Connect to the cluster
         uses: google-github-actions/get-gke-credentials@v2
         with:
