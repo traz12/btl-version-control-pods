@@ -174,17 +174,45 @@ jobs:
 
       - name: Check the pods answer, and answer with the right version
         run: |
-          # Ask the service from inside the cluster, so a broken build fails here
-          # and not in front of a user. The version has to match what we just
-          # released, which catches a rollout that quietly kept the old pods.
-          got=$(kubectl run "smoke-$SHORT_SHA" -n "$NAMESPACE" --rm -i --restart=Never \
-            --image=curlimages/curl:8.11.1 --quiet -- \
-            sh -c 'for i in 1 2 3; do curl -sS --max-time 10 http://breaker.'"$NAMESPACE"'.svc.cluster.local/version && exit 0; sleep 5; done; exit 1')
-          echo "$got"
-          echo "$got" | grep -q "\"version\":\"$APP_VERSION\"" || {
-            echo "::error::The pods answered, but not with v$APP_VERSION."
+          # Ask the new pods directly, not through the service. During a rolling
+          # update the terminating pod can still be in the service's endpoint
+          # list for its termination grace period, and asking through the
+          # service can bounce onto it and see the previous version.
+          # Every new pod carries `app.kubernetes.io/version=<this release>`,
+          # so we ask them by name.
+          pods=$(kubectl get pods -n "$NAMESPACE" \
+            -l "app=breaker,app.kubernetes.io/version=$APP_VERSION" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          if [[ -z "$pods" ]]; then
+            echo "::error::No pod is carrying app.kubernetes.io/version=$APP_VERSION - the deployment did not roll out this release."
             exit 1
-          }
+          fi
+          echo "$pods" | while read -r pod; do
+            [[ -z "$pod" ]] && continue
+            got=$(kubectl exec -n "$NAMESPACE" "$pod" -- \
+              python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8080/version", timeout=5).read().decode())')
+            echo "$pod -> $got"
+            echo "$got" | grep -q "\"version\":\"$APP_VERSION\"" || {
+              echo "::error::Pod $pod carries the v$APP_VERSION label but reports something else."
+              exit 1
+            }
+          done
+          echo "All new pods answered with v$APP_VERSION."
+
+      - name: And the service routes to a new pod
+        run: |
+          # A final courtesy check through the service, so we know traffic really
+          # is landing on a v$APP_VERSION pod, not just that the pods exist.
+          kubectl run "smoke-$SHORT_SHA" -n "$NAMESPACE" --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 --quiet -- \
+            sh -c 'for i in 1 2 3 4 5 6; do
+                     out=$(curl -sS --max-time 10 http://breaker.'"$NAMESPACE"'.svc.cluster.local/version || true)
+                     echo "$out" | grep -q "\"version\":\"'"$APP_VERSION"'\"" && { echo "$out"; exit 0; }
+                     sleep 5
+                   done
+                   echo "$out"
+                   echo "the service kept answering with something other than v'"$APP_VERSION"'."
+                   exit 1'
 
       - name: What went wrong
         if: failure()
