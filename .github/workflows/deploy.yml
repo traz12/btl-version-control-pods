@@ -4,6 +4,9 @@ name: Build & Deploy
 #   dev  -> breaker-dev   -> namespace breaker-dev
 #   test -> breaker-test  -> namespace breaker-test
 #   main -> breaker-prod  -> namespace breaker-prod
+#
+# Every push releases a new version of that one environment. The size of the
+# release comes from the pull request label, or is a patch if there is none.
 on:
   push:
     branches: [dev, test, main]
@@ -15,20 +18,24 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write        # to push the release tag
+  pull-requests: read    # to read the version label off the merged pull request
 
 jobs:
   resolve:
-    name: Work out the environment
+    name: Work out the environment and version
     runs-on: ubuntu-latest
     outputs:
       env: ${{ steps.env.outputs.env }}
       image_name: ${{ steps.env.outputs.image_name }}
       namespace: ${{ steps.env.outputs.namespace }}
-      version: ${{ steps.env.outputs.version }}
+      bump: ${{ steps.bump.outputs.bump }}
+      version: ${{ steps.version.outputs.version }}
       short_sha: ${{ steps.env.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the release tags are the version history
 
       - id: env
         run: |
@@ -37,13 +44,50 @@ jobs:
             echo "env=$ENV"
             echo "image_name=breaker-$ENV"
             echo "namespace=breaker-$ENV"
-            echo "version=$(cat VERSION)"
             echo "short_sha=${GITHUB_SHA::7}"
           } >> "$GITHUB_OUTPUT"
           echo "Branch ${GITHUB_REF_NAME} deploys to the $ENV environment."
 
+      - name: How big is this release
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The label is read here, at merge time, rather than written into the
+          # branch. That keeps it editable right up to the moment you merge.
+          labels=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq '.[0].labels[]?.name' 2>/dev/null || true)
+          picked=$(printf '%s\n' "$labels" | sed -n 's/^version://p' | sort -u)
+          count=$(printf '%s' "$picked" | grep -c . || true)
+          if [[ "$count" -gt 1 ]]; then
+            echo "::error::This pull request carries more than one version label ($(echo $picked)). Use one of version:major, version:minor, version:patch."
+            exit 1
+          fi
+          bump="${picked:-patch}"
+          case "$bump" in
+            major|minor|patch) ;;
+            *) echo "::error::'version:$bump' is not a label this repository knows. Use version:major, version:minor or version:patch."; exit 1 ;;
+          esac
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          if [[ -z "$picked" ]]; then
+            echo "No version label, so this is a patch."
+          else
+            echo "The pull request asked for a $bump release."
+          fi
+
+      - name: What version is that
+        id: version
+        env:
+          ENV: ${{ steps.env.outputs.env }}
+          BUMP: ${{ steps.bump.outputs.bump }}
+        run: |
+          CURRENT=$(bash scripts/version.sh "$ENV" current)
+          VERSION=$(bash scripts/version.sh "$ENV" next "$BUMP")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "$ENV goes from ${CURRENT} to ${VERSION}."
+
   deploy:
-    name: Deploy to ${{ needs.resolve.outputs.env }}
+    name: Deploy to ${{ needs.resolve.outputs.env }} v${{ needs.resolve.outputs.version }}
     needs: [resolve]
     runs-on: ubuntu-latest
     # The GitHub environment of the same name. Add reviewers to it in the
@@ -62,6 +106,8 @@ jobs:
       SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Sign in to Google Cloud
         uses: google-github-actions/auth@v2
@@ -79,10 +125,21 @@ jobs:
         id: image
         run: |
           BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE_NAME}"
-          # The pod always runs the commit tag, so every push really does roll out.
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          echo "deployed=$BASE:sha-$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          echo "Image: $BASE:sha-$SHORT_SHA"
+          # The pod runs the version tag. Every release gets a new number, so
+          # Kubernetes always sees a new image and really does roll out.
+          echo "deployed=$BASE:v$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Image: $BASE:v$APP_VERSION"
+
+      - name: Refuse to reuse a version
+        run: |
+          # A version that already exists in the registry would mean two
+          # different builds sharing one number. Stop before that happens.
+          if gcloud artifacts docker tags list "${{ steps.image.outputs.base }}" \
+               --format='value(tag)' 2>/dev/null | grep -qx "v$APP_VERSION"; then
+            echo "::error::$IMAGE_NAME already has a v$APP_VERSION image. The release tags and the registry are out of step - check the tags on this branch."
+            exit 1
+          fi
 
       - name: Build
         run: |
@@ -91,8 +148,8 @@ jobs:
             --build-arg APP_VERSION="$APP_VERSION" \
             --build-arg GIT_SHA="$SHORT_SHA" \
             --build-arg BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -t "${{ steps.image.outputs.base }}:sha-$SHORT_SHA" \
             -t "${{ steps.image.outputs.base }}:v$APP_VERSION" \
+            -t "${{ steps.image.outputs.base }}:sha-$SHORT_SHA" \
             -t "${{ steps.image.outputs.base }}:latest" \
             .
 
@@ -108,19 +165,54 @@ jobs:
       - name: Deploy
         run: |
           kubectl apply -f "k8s/${ENVIRONMENT}/namespace.yaml"
-          IMAGE="${{ steps.image.outputs.deployed }}" envsubst '${IMAGE}' \
-            < "k8s/${ENVIRONMENT}/deployment.yaml" | kubectl apply -f -
+          IMAGE="${{ steps.image.outputs.deployed }}" VERSION="$APP_VERSION" \
+            envsubst '${IMAGE} ${VERSION}' < "k8s/${ENVIRONMENT}/deployment.yaml" \
+            | kubectl apply -f -
           kubectl apply -f "k8s/${ENVIRONMENT}/service.yaml"
           kubectl rollout status deployment/breaker -n "$NAMESPACE" --timeout=300s
-          kubectl get pods -n "$NAMESPACE" -o wide
+          kubectl get pods -n "$NAMESPACE" -L app.kubernetes.io/version
 
-      - name: Check the pods answer
+      - name: Check the pods answer, and answer with the right version
         run: |
-          # Ask the service from inside the cluster, so a broken build fails here
-          # and not in front of a user.
+          # Ask the new pods directly, not through the service. During a rolling
+          # update the terminating pod can still be in the service's endpoint
+          # list for its termination grace period, and asking through the
+          # service can bounce onto it and see the previous version.
+          # Every new pod carries `app.kubernetes.io/version=<this release>`,
+          # so we ask them by name.
+          pods=$(kubectl get pods -n "$NAMESPACE" \
+            -l "app=breaker,app.kubernetes.io/version=$APP_VERSION" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          if [[ -z "$pods" ]]; then
+            echo "::error::No pod is carrying app.kubernetes.io/version=$APP_VERSION - the deployment did not roll out this release."
+            exit 1
+          fi
+          echo "$pods" | while read -r pod; do
+            [[ -z "$pod" ]] && continue
+            got=$(kubectl exec -n "$NAMESPACE" "$pod" -- \
+              python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8080/version", timeout=5).read().decode())')
+            echo "$pod -> $got"
+            echo "$got" | grep -q "\"version\":\"$APP_VERSION\"" || {
+              echo "::error::Pod $pod carries the v$APP_VERSION label but reports something else."
+              exit 1
+            }
+          done
+          echo "All new pods answered with v$APP_VERSION."
+
+      - name: And the service routes to a new pod
+        run: |
+          # A final courtesy check through the service, so we know traffic really
+          # is landing on a v$APP_VERSION pod, not just that the pods exist.
           kubectl run "smoke-$SHORT_SHA" -n "$NAMESPACE" --rm -i --restart=Never \
             --image=curlimages/curl:8.11.1 --quiet -- \
-            curl -sS --fail --max-time 10 http://breaker.${NAMESPACE}.svc.cluster.local/version
+            sh -c 'for i in 1 2 3 4 5 6; do
+                     out=$(curl -sS --max-time 10 http://breaker.'"$NAMESPACE"'.svc.cluster.local/version || true)
+                     echo "$out" | grep -q "\"version\":\"'"$APP_VERSION"'\"" && { echo "$out"; exit 0; }
+                     sleep 5
+                   done
+                   echo "$out"
+                   echo "the service kept answering with something other than v'"$APP_VERSION"'."
+                   exit 1'
 
       - name: What went wrong
         if: failure()
@@ -130,15 +222,28 @@ jobs:
           kubectl logs -n "$NAMESPACE" -l app=breaker --tail=50 || true
           kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp | tail -20 || true
 
+      - name: Tag the release
+        run: |
+          # Only a release that is actually serving traffic gets a tag, so the
+          # tags stay an honest history of what reached each environment.
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${ENVIRONMENT}/v${APP_VERSION}"
+          git tag -a "$TAG" -m "Release $ENVIRONMENT v$APP_VERSION from ${GITHUB_REF_NAME} (${SHORT_SHA})"
+          git push origin "refs/tags/$TAG"
+          echo "Tagged $TAG"
+
       - name: Summary
         if: always()
         run: |
           {
-            echo "### Deploy to \`$ENVIRONMENT\`"
+            echo "### $ENVIRONMENT v$APP_VERSION"
             echo ""
             echo "| | |"
             echo "|---|---|"
             echo "| Branch | \`${GITHUB_REF_NAME}\` |"
+            echo "| Release size | \`${{ needs.resolve.outputs.bump }}\` |"
+            echo "| Git tag | \`$ENVIRONMENT/v$APP_VERSION\` |"
             echo "| Image | \`${{ steps.image.outputs.deployed }}\` |"
             echo "| Namespace | \`$NAMESPACE\` |"
             echo "| Cluster | \`$CLUSTER\` (\`$REGION\`) |"
